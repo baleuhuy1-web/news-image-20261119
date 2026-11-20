@@ -1,71 +1,79 @@
 #!/usr/bin/env python3
-"""Hand the finished front page to the grading harness.
+"""Deliver entry.png to the output directory named by MAKEFUN_OUTPUT_DIR.
 
-The picture itself is rendered ahead of time by build_image.py and kept
-beside this file as entry.png.  At run time this program only has to put a
-copy of that file where the harness looks for it: entry.png inside the
-directory given by MAKEFUN_OUTPUT_DIR, or /output when that variable is
-not set.  Before copying it checks the file really is a PNG, is within the
-size limit and is no larger than 1024x1024; after copying it reads both
-files back and refuses to finish unless they match byte for byte.  Only
-the Python standard library is used, and nothing here touches the network.
+Standard library only. The image is validated before it is copied and the
+copy is checked byte-for-byte afterwards, so a bad or truncated file can
+never be delivered silently.
 """
 
+import hashlib
 import os
 import shutil
 import struct
 import sys
 
-PICTURE = "entry.png"
-FALLBACK_DIR = "/output"
-MAGIC = b"\x89PNG\r\n\x1a\n"
-SIZE_LIMIT = 1_048_576
-EDGE_LIMIT = 1024
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+MAX_BYTES = 1_048_576
+MAX_SIDE = 1024
 
 
-def validate(path):
-    """Check the picture's limits; return a message or None when it is fine."""
-    if os.path.getsize(path) > SIZE_LIMIT:
-        return f"{PICTURE} is over the {SIZE_LIMIT}-byte limit"
-    with open(path, "rb") as handle:
-        opening = handle.read(24)
-    if len(opening) < 24 or not opening.startswith(MAGIC):
-        return f"{PICTURE} does not start with a PNG signature"
-    # Width and height sit in the IHDR chunk as big-endian 32-bit values
-    # at byte offsets 16 and 20.
-    wide, tall = struct.unpack(">II", opening[16:24])
-    if wide > EDGE_LIMIT or tall > EDGE_LIMIT:
-        return f"{PICTURE} is {wide}x{tall}, over {EDGE_LIMIT}px"
-    return None
+def fail(message):
+    print(f"error: {message}", file=sys.stderr)
+    sys.exit(1)
 
 
-def same_bytes(first, second):
-    with open(first, "rb") as a, open(second, "rb") as b:
-        return a.read() == b.read()
+def check_image(path):
+    """Validate the PNG: signature, size, and IHDR dimensions."""
+    try:
+        with open(path, "rb") as handle:
+            blob = handle.read()
+    except OSError as exc:
+        fail(f"cannot read {path}: {exc}")
+
+    if len(blob) < 8 or blob[:8] != PNG_MAGIC:
+        fail(f"{path} is not a PNG file")
+    if len(blob) > MAX_BYTES:
+        fail(f"{path} is {len(blob)} bytes, over the {MAX_BYTES} byte limit")
+    if len(blob) < 24 or blob[12:16] != b"IHDR":
+        fail(f"{path} has no IHDR chunk")
+    width, height = struct.unpack(">II", blob[16:24])
+    if width > MAX_SIDE or height > MAX_SIDE:
+        fail(f"{path} is {width}x{height}, over the {MAX_SIDE}x{MAX_SIDE} limit")
+    return blob
 
 
-def run():
-    folder = os.path.dirname(os.path.abspath(__file__))
-    source = os.path.join(folder, PICTURE)
-    if not os.path.isfile(source):
-        print(f"error: {PICTURE} is missing next to main.py", file=sys.stderr)
-        return 1
-    fault = validate(source)
-    if fault:
-        print(f"error: {fault}", file=sys.stderr)
-        return 1
+def digest(blob):
+    return hashlib.sha256(blob).hexdigest()
 
-    target_dir = os.environ.get("MAKEFUN_OUTPUT_DIR") or FALLBACK_DIR
-    os.makedirs(target_dir, exist_ok=True)
-    target = os.path.join(target_dir, PICTURE)
-    shutil.copyfile(source, target)
-    if not same_bytes(source, target):
-        print("error: the copy is not identical to the original",
-              file=sys.stderr)
-        return 1
-    print(f"wrote {target} ({os.path.getsize(target)} bytes, verified)")
-    return 0
+
+def main():
+    here = os.path.dirname(os.path.abspath(__file__))
+    source = os.path.join(here, "entry.png")
+    source_bytes = check_image(source)
+
+    target_dir = os.environ.get("MAKEFUN_OUTPUT_DIR") or "/output"
+    try:
+        os.makedirs(target_dir, exist_ok=True)
+    except OSError as exc:
+        fail(f"cannot create {target_dir}: {exc}")
+
+    destination = os.path.join(target_dir, "entry.png")
+    try:
+        shutil.copyfile(source, destination)
+    except OSError as exc:
+        fail(f"cannot copy to {destination}: {exc}")
+
+    try:
+        with open(destination, "rb") as handle:
+            delivered = handle.read()
+    except OSError as exc:
+        fail(f"cannot read back {destination}: {exc}")
+
+    if digest(delivered) != digest(source_bytes):
+        fail(f"{destination} does not match {source} byte-for-byte")
+
+    print(f"delivered {destination} ({len(delivered)} bytes)")
 
 
 if __name__ == "__main__":
-    sys.exit(run())
+    main()

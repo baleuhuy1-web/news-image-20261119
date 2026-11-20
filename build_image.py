@@ -1,196 +1,209 @@
 #!/usr/bin/env python3
-"""Render entry.png: a newspaper front page for Thursday 19 November 2026.
+"""Compose the front page for Thursday 19 November 2026 and save entry.png.
 
-Six illustrated panels sit in assets/.  This script lays them out in a
-two-by-three grid on a cream newsprint sheet and draws all lettering with
-PIL, so the picture model never has to render words (it would garble them).
-The finished page is written to entry.png beside this script: exactly
-1024x1024 pixels and inside the competition's 1 MiB size limit.
+Everything on the page is drawn by this script: masthead, date band, six
+story panels with headlines and sublines, and the ticker footer.
+Only Pillow is used; the story panels come from the local assets folder.
 """
 
 import os
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-BASE = os.path.dirname(os.path.abspath(__file__))
-PANEL_DIR = os.path.join(BASE, "assets")
-TARGET = os.path.join(BASE, "entry.png")
+PAGE = 1024
+MARGIN = 28
+GUTTER = 16
+PAPER = (247, 242, 231)
+INK = (0, 0, 0)
+CRIMSON = (178, 24, 43)
+GREY = (90, 90, 90)
+WHITE = (255, 255, 255)
 BYTE_LIMIT = 1_048_576
 
-PAGE = 1024
-EDGE = 28
-GAP = 16
-NEWS = (247, 242, 231)
-DARK = (22, 20, 18)
-MID = (74, 70, 64)
-RED = (178, 24, 43)
-SNOW = (255, 255, 255)
-SOOT = (17, 17, 17)
+SERIF_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf"
+SANS_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+SANS = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
-FONTS = "/usr/share/fonts/truetype/dejavu"
-SERIF = os.path.join(FONTS, "DejaVuSerif-Bold.ttf")
-SANS_B = os.path.join(FONTS, "DejaVuSans-Bold.ttf")
-SANS_R = os.path.join(FONTS, "DejaVuSans.ttf")
+HERE = os.path.dirname(os.path.abspath(__file__))
 
-# (panel file, headline, subline, crop anchor 0.0=top .. 1.0=bottom)
 STORIES = [
-    ("panel1.png", "TRUMP, XI AND PUTIN MEET IN SHENZHEN",
-     "First-ever three-way summit ends with pledge that a nuclear war "
-     "cannot be won", 0.45),
-    ("panel2.png", "GTA VI IS OUT",
-     "Rockstar's epic launches at midnight after a 13-year wait", 0.55),
-    ("panel3.png", "COURT: MYANMAR COMMITTED GENOCIDE",
-     "Top UN court rules against Myanmar over the Rohingya; verdict "
-     "cannot be appealed", 0.50),
-    ("panel4.png", "IRAN WIDENS WAR TO GULF STATES",
-     "Tehran hits Gulf targets and tankers after US strikes on "
-     "Qeshm island", 0.50),
-    ("panel5.png", "EU PROPOSES €45BN LOAN FOR UKRAINE",
-     "Brussels unveils joint-debt package as fighting intensifies on "
-     "the eastern front", 0.50),
-    ("panel6.png", "COP31 DRAFT DROPS FOSSIL FUELS",
-     "Outcry as latest climate deal text in Antalya omits the phase-out",
-     0.50),
+    (
+        "TRUMP, XI AND PUTIN MEET IN SHENZHEN",
+        "First-ever three-way summit ends with pledge that a nuclear war cannot be won",
+    ),
+    (
+        "GTA VI IS OUT",
+        "Rockstar's epic launches at midnight after a 13-year wait",
+    ),
+    (
+        "COURT: MYANMAR COMMITTED GENOCIDE",
+        "Top UN court rules against Myanmar over the Rohingya; verdict cannot be appealed",
+    ),
+    (
+        "IRAN WIDENS WAR TO GULF STATES",
+        "Tehran hits Gulf targets and tankers after US strikes on Qeshm island",
+    ),
+    (
+        "EU PROPOSES \u20ac45BN LOAN FOR UKRAINE",
+        "Brussels unveils joint-debt package as fighting intensifies on the eastern front",
+    ),
+    (
+        "COP31 DRAFT DROPS FOSSIL FUELS",
+        "Outcry as latest climate deal text in Antalya omits the phase-out",
+    ),
 ]
 
 TICKER = [
-    "ANTHROPIC'S RECORD IPO HITS NASDAQ • FIJI AND TONGA DECLARE "
-    "EL NIÑO EMERGENCIES",
+    "ANTHROPIC'S RECORD IPO HITS NASDAQ \u2022 FIJI AND TONGA DECLARE EL NI\u00d1O EMERGENCIES",
     "ISRAEL COMPLETES GAZA OPERATION BEYOND 'YELLOW LINE'",
 ]
 
 
-def font(path, size):
+def load(path, size):
     return ImageFont.truetype(path, size)
 
 
-def shrink_to_fit(draw, words, path, width, top_size, floor=12):
-    """Biggest size (no larger than top_size) that keeps words on one line."""
-    size = top_size
-    while size > floor:
-        face = font(path, size)
-        if draw.textlength(words, font=face) <= width:
-            return face
+def shrink_to_fit(canvas, text, path, start_size, max_width):
+    """Largest font size at which the text fits inside max_width."""
+    size = start_size
+    while size > 8:
+        candidate = load(path, size)
+        if canvas.textlength(text, font=candidate) <= max_width:
+            return candidate
         size -= 1
-    return font(path, floor)
+    return load(path, 8)
 
 
-def split_lines(draw, words, face, width):
-    """Greedy wrap of words into lines no wider than width."""
-    lines, line = [], ""
-    for word in words.split():
-        candidate = (line + " " + word).strip()
-        if draw.textlength(candidate, font=face) <= width:
-            line = candidate
+def wrap_text(canvas, text, face, max_width):
+    """Greedy word wrap measured with the real font."""
+    lines = []
+    current = ""
+    for word in text.split():
+        trial = f"{current} {word}".strip()
+        if not current or canvas.textlength(trial, font=face) <= max_width:
+            current = trial
         else:
-            if line:
-                lines.append(line)
-            line = word
-    if line:
-        lines.append(line)
+            lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
     return lines
 
 
-def centred(draw, middle_x, top, words, face, colour):
-    span = draw.textlength(words, font=face)
-    draw.text((middle_x - span / 2, top), words, font=face, fill=colour)
+def block_height(face, line_count, leading):
+    ascent, descent = face.getmetrics()
+    return line_count * (ascent + descent + leading) - leading
 
 
-def compose():
-    sheet = Image.new("RGB", (PAGE, PAGE), NEWS)
-    pen = ImageDraw.Draw(sheet)
-    span = PAGE - 2 * EDGE
-    middle = PAGE // 2
+def main():
+    sheet = Image.new("RGB", (PAGE, PAGE), PAPER)
+    canvas = ImageDraw.Draw(sheet)
+    content_w = PAGE - 2 * MARGIN
+    col_w = (content_w - GUTTER) // 2
 
-    # ---- masthead ------------------------------------------------------
-    top = 18
-    pen.rectangle([EDGE, top, PAGE - EDGE, top + 5], fill=DARK)
-    top += 9
-    pen.rectangle([EDGE, top, PAGE - EDGE, top + 2], fill=DARK)
-    top += 12
-    title_face = shrink_to_fit(pen, "THE WORLD TODAY", SERIF, span, 112)
-    box = pen.textbbox((0, 0), "THE WORLD TODAY", font=title_face)
-    centred(pen, middle, top - box[1], "THE WORLD TODAY", title_face, DARK)
-    top += (box[3] - box[1]) + 12
+    # --- Top rules and masthead -------------------------------------------
+    y = MARGIN
+    canvas.rectangle([MARGIN, y, PAGE - MARGIN, y + 3], fill=INK)
+    y += 11
+    masthead = shrink_to_fit(canvas, "THE WORLD TODAY", SERIF_BOLD, 118, content_w)
+    ascent, descent = masthead.getmetrics()
+    canvas.text((PAGE // 2, y), "THE WORLD TODAY", font=masthead, fill=INK, anchor="ma")
+    y += ascent + descent + 8
+    canvas.rectangle([MARGIN, y, PAGE - MARGIN, y + 3], fill=INK)
+    y += 13
 
-    ribbon_h = 46
-    pen.rectangle([EDGE, top, PAGE - EDGE, top + ribbon_h], fill=RED)
-    day = "THURSDAY 19 NOVEMBER 2026"
-    day_face = shrink_to_fit(pen, day, SANS_B, span - 40, 28)
-    dbox = pen.textbbox((0, 0), day, font=day_face)
-    day_top = top + (ribbon_h - (dbox[3] - dbox[1])) // 2 - dbox[1]
-    centred(pen, middle, day_top, day, day_face, SNOW)
-    top += ribbon_h + 8
-    pen.rectangle([EDGE, top, PAGE - EDGE, top + 2], fill=DARK)
-    grid_start = top + 14
+    # --- Crimson date band --------------------------------------------------
+    canvas.rectangle([MARGIN, y, PAGE - MARGIN, y + 46], fill=CRIMSON)
+    date_face = load(SANS_BOLD, 24)
+    canvas.text(
+        (PAGE // 2, y + 23),
+        "THURSDAY 19 NOVEMBER 2026",
+        font=date_face,
+        fill=WHITE,
+        anchor="mm",
+    )
+    y += 46 + 12
+    grid_top = y
 
-    # ---- story grid ----------------------------------------------------
-    strip_h = 68
-    grid_end = PAGE - strip_h - 12
-    col_w = (span - GAP) // 2
-    row_h = (grid_end - grid_start) // 3
-
-    head_face = font(SANS_B, 23)
-    sub_face = font(SANS_R, 16)
-    head_step, sub_step, head_sub_gap = 27, 20, 4
-
-    for row in range(3):
-        pair = STORIES[row * 2: row * 2 + 2]
-        # Wrap every caption first so both pictures in the row share a
-        # height and their headlines line up.
-        captions = []
-        tallest = 0
-        for _, headline, subline, _ in pair:
-            heads = split_lines(pen, headline, head_face, col_w)
-            subs = split_lines(pen, subline, sub_face, col_w)
-            captions.append((heads, subs))
-            height = (len(heads) * head_step + head_sub_gap
-                      + len(subs) * sub_step)
-            tallest = max(tallest, height)
-        pic_h = row_h - tallest - 8
-        row_top = grid_start + row * row_h
-
-        for col, (story, (heads, subs)) in enumerate(zip(pair, captions)):
-            name, _, _, anchor = story
-            left = EDGE + col * (col_w + GAP)
-            picture = Image.open(os.path.join(PANEL_DIR, name)).convert("RGB")
-            picture = ImageOps.fit(picture, (col_w, pic_h),
-                                   method=Image.LANCZOS,
-                                   centering=(0.5, anchor))
-            sheet.paste(picture, (left, row_top))
-            pen.rectangle([left, row_top, left + col_w - 1,
-                           row_top + pic_h - 1], outline=DARK, width=2)
-            cursor = row_top + pic_h + 6
-            for line in heads:
-                pen.text((left, cursor), line, font=head_face, fill=DARK)
-                cursor += head_step
-            cursor += head_sub_gap
-            for line in subs:
-                pen.text((left, cursor), line, font=sub_face, fill=MID)
-                cursor += sub_step
-
-    # ---- ticker strip --------------------------------------------------
-    strip_top = PAGE - strip_h
-    pen.rectangle([0, strip_top, PAGE, PAGE], fill=SOOT)
-    step = 27
-    cursor = strip_top + (strip_h - step * len(TICKER)) // 2
+    # --- Footer geometry (computed first so the grid can fill the rest) ----
+    ticker_face = load(SANS_BOLD, 20)
     for line in TICKER:
-        # Long ticker lines must shrink to fit the page instead of
-        # running off its edges.
-        tick_face = shrink_to_fit(pen, line, SANS_B, PAGE - 32, 20)
-        centred(pen, middle, cursor, line, tick_face, SNOW)
-        cursor += step
+        while (
+            ticker_face.size > 8
+            and canvas.textlength(line, font=ticker_face) > content_w - 16
+        ):
+            ticker_face = load(SANS_BOLD, ticker_face.size - 1)
+    t_ascent, t_descent = ticker_face.getmetrics()
+    ticker_line_h = t_ascent + t_descent + 4
+    footer_h = 2 * ticker_line_h + 16
+    footer_top = PAGE - MARGIN - footer_h
 
-    # ---- save, keeping under the 1 MiB ceiling -------------------------
-    sheet.save(TARGET, optimize=True)
-    size = os.path.getsize(TARGET)
+    # --- Story text layout ---------------------------------------------------
+    head_face = load(SANS_BOLD, 23)
+    sub_face = load(SANS, 16)
+    laid_out = []
+    for headline, subline in STORIES:
+        head_lines = wrap_text(canvas, headline, head_face, col_w)
+        sub_lines = wrap_text(canvas, subline, sub_face, col_w)
+        laid_out.append((head_lines, sub_lines))
+    tallest_text = 0
+    for head_lines, sub_lines in laid_out:
+        block = (
+            block_height(head_face, len(head_lines), 3)
+            + 4
+            + block_height(sub_face, len(sub_lines), 2)
+        )
+        tallest_text = max(tallest_text, block)
+
+    row_h = (footer_top - 12 - grid_top) // 3
+    panel_h = row_h - tallest_text - 10
+    if panel_h < 80:
+        panel_h = 80
+
+    # --- Grid of panels ------------------------------------------------------
+    for index, ((head_lines, sub_lines)) in enumerate(laid_out):
+        row, col = divmod(index, 2)
+        cell_x = MARGIN + col * (col_w + GUTTER)
+        cell_y = grid_top + row * row_h
+
+        panel_path = os.path.join(HERE, "assets", f"panel{index + 1}.png")
+        with Image.open(panel_path) as raw:
+            panel = ImageOps.fit(raw.convert("RGB"), (col_w, panel_h), Image.LANCZOS)
+        sheet.paste(panel, (cell_x, cell_y))
+        canvas.rectangle(
+            [cell_x, cell_y, cell_x + col_w - 1, cell_y + panel_h - 1],
+            outline=INK,
+            width=2,
+        )
+
+        text_y = cell_y + panel_h + 6
+        for line in head_lines:
+            canvas.text((cell_x, text_y), line, font=head_face, fill=INK)
+            text_y += head_face.getmetrics()[0] + head_face.getmetrics()[1] + 3
+        text_y += 4
+        for line in sub_lines:
+            canvas.text((cell_x, text_y), line, font=sub_face, fill=GREY)
+            text_y += sub_face.getmetrics()[0] + sub_face.getmetrics()[1] + 2
+
+    # --- Black ticker footer ---------------------------------------------------
+    canvas.rectangle(
+        [MARGIN, footer_top, PAGE - MARGIN, footer_top + footer_h], fill=INK
+    )
+    line_y = footer_top + 8 + t_ascent
+    for line in TICKER:
+        canvas.text((PAGE // 2, line_y), line, font=ticker_face, fill=WHITE, anchor="ma")
+        line_y += ticker_line_h
+
+    out_path = os.path.join(HERE, "entry.png")
+    sheet.save(out_path, "PNG")
+    size = os.path.getsize(out_path)
     if size > BYTE_LIMIT:
-        flat = sheet.quantize(colors=256, method=Image.MEDIANCUT)
-        flat.save(TARGET, optimize=True)
-        size = os.path.getsize(TARGET)
+        sheet.convert("P", palette=Image.ADAPTIVE, colors=256).convert("RGB").save(
+            out_path, "PNG"
+        )
+        size = os.path.getsize(out_path)
     print(f"entry.png: {sheet.size[0]}x{sheet.size[1]}, {size} bytes")
-    return size
 
 
 if __name__ == "__main__":
-    compose()
+    main()
